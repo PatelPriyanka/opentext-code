@@ -41,4 +41,5 @@ class Main {
 // The number of characters 'stars' is calculated by linear interpolation:
 // When i=1, stars should be (1 * base) / height = 4/3 ~ 1
 // When i=2, stars should be (2 * base) / height = 8/3 ~ 2
+
 // When i=3, stars should be (3 * base) / height = 4

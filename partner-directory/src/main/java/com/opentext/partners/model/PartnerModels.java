@@ -3,6 +3,8 @@ package com.opentext.partners.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * Models for deserializing the JSON data from the partner-directory API.
@@ -10,9 +12,36 @@ import java.util.List;
  */
 public class PartnerModels {
 
-    /** Maps the root of the partner-directory JSON */
+    /**
+     * --- UPDATED ---
+     * Maps the root of the partner-directory JSON.
+     * Added @JsonProperty("total") to capture the total count.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record PartnerDirectoryRoot(@JsonProperty("results") PartnerResults results) {}
+    public record PartnerDirectoryRoot(
+            @JsonProperty("total") String total, // <-- ADDED THIS LINE
+            @JsonProperty("results") PartnerResults results
+    ) {
+        /**
+         * --- NEW HELPER METHOD ---
+         * A small helper to safely extract the final list of partners
+         * from the nested JSON structure.
+         */
+        public List<RawPartner> getAllPartners() {
+            if (results == null || results.assets == null) {
+                return List.of();
+            }
+            return results.assets.stream()
+                    .filter(Objects::nonNull)
+                    .map(PartnerAsset::contentJson)
+                    .filter(Objects::nonNull)
+                    .map(PartnerContentJson::partnerRoot)
+                    .filter(Objects::nonNull)
+                    .map(PartnerRoot::partner)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+        }
+    }
 
     /** Maps the 'results' object */
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -42,5 +71,20 @@ public class PartnerModels {
             @JsonProperty("PartnerType__c") String partnerType,
             @JsonProperty("Short_Description") String shortDescription,
             @JsonProperty("PartnerCompanyOverview__c") String companyOverview // Fallback description
-    ) {}
+    ) {
+        /**
+         * --- NEW CONSTRUCTOR ---
+         * This constructor automatically runs to clean HTML tags from the description
+         * fields, ensuring the final JSON is clean.
+         */
+        public RawPartner {
+            if (shortDescription != null) {
+                shortDescription = shortDescription.replaceAll("<[^>]*>", "").trim();
+            }
+            if (companyOverview != null) {
+                companyOverview = companyOverview.replaceAll("<[^>]*>", "").trim();
+            }
+        }
+    }
 }
+

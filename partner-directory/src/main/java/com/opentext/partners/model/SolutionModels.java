@@ -3,6 +3,8 @@ package com.opentext.partners.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * Models for deserializing the JSON data from the partner-solutions-catalog API.
@@ -10,9 +12,36 @@ import java.util.List;
  */
 public class SolutionModels {
 
-    /** Maps the root of the partner-solutions-catalog JSON */
+    /**
+     * --- UPDATED ---
+     * Maps the root of the partner-solutions-catalog JSON.
+     * Added @JsonProperty("total") to capture the total count.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record SolutionCatalogRoot(@JsonProperty("results") SolutionResults results) {}
+    public record SolutionCatalogRoot(
+            @JsonProperty("total") String total, // <-- ADDED THIS LINE
+            @JsonProperty("results") SolutionResults results
+    ) {
+        /**
+         * --- NEW HELPER METHOD ---
+         * A small helper to safely extract the final list of solutions
+         * from the nested JSON structure.
+         */
+        public List<RawSolution> getAllSolutions() {
+            if (results == null || results.assets == null) {
+                return List.of();
+            }
+            return results.assets.stream()
+                    .filter(Objects::nonNull)
+                    .map(SolutionAsset::contentJson)
+                    .filter(Objects::nonNull)
+                    .map(SolutionContentJson::solutionRoot)
+                    .filter(Objects::nonNull)
+                    .map(SolutionRoot::solution)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+        }
+    }
 
     /** Maps the 'results' object */
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -48,5 +77,17 @@ public class SolutionModels {
             @JsonProperty("solutionpartnername") String partnerName, // Crucial for joining
             @JsonProperty("solutiondisplayname") String displayName,
             @JsonProperty("urlsolutionshortdescription") String shortDescription
-    ) {}
+    ) {
+        /**
+         * --- NEW CONSTRUCTOR ---
+         * This constructor automatically runs to clean HTML tags from the description
+         * field, ensuring the final JSON is clean.
+         */
+        public RawSolution {
+            if (shortDescription != null) {
+                shortDescription = shortDescription.replaceAll("<[^>]*>", "").trim();
+            }
+        }
+    }
 }
+

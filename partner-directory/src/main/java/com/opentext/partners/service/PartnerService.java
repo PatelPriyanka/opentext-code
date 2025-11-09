@@ -23,6 +23,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
+import reactor.netty.http.client.HttpClient;
+
 @Service
 public class PartnerService {
 
@@ -43,8 +47,22 @@ public class PartnerService {
      * --- NEW / FIXED CONSTRUCTOR ---
      * This injects the WebClient.Builder and initializes the webClient field.
      */
+//    public PartnerService(WebClient.Builder webClientBuilder) {
+//        this.webClient = webClientBuilder.build();
+//    }
+
     public PartnerService(WebClient.Builder webClientBuilder) {
-        this.webClient = webClientBuilder.build();
+        // increase buffer size (default: 256KB → set to 10MB)
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(configurer -> configurer
+                        .defaultCodecs()
+                        .maxInMemorySize(10 * 1024 * 1024)) // 10 MB
+                .build();
+
+        this.webClient = webClientBuilder
+                .clientConnector(new ReactorClientHttpConnector(HttpClient.create()))
+                .exchangeStrategies(strategies)
+                .build();
     }
 
     /**

@@ -75,7 +75,7 @@ public class SolutionModels {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record RawSolution(
             @JsonProperty("solutionpartnername") String partnerName, // Crucial for joining
-            @JsonProperty("solutiondisplayname") String displayName,
+            @JsonProperty("solutionname") String displayName,
             @JsonProperty("urlsolutionshortdescription") String shortDescription
     ) {
         /**

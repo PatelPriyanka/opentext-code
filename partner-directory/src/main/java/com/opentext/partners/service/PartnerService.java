@@ -137,7 +137,7 @@ public class PartnerService {
                     List<Mono<List<RawPartner>>> batchMonos = new ArrayList<>();
                     for (int start = 0; start < total; start += BATCH_SIZE) {
                         String url = String.format(PARTNERS_URL_TEMPLATE, start, BATCH_SIZE);
-                        log.info("Partner: Fetch data start: {} and the url: {}", start, url);
+//                        log.info("Partner: Fetch data start: {} and the url: {}", start, url);
                         Mono<List<RawPartner>> batchMono = webClient.get()
                                 .uri(url)
                                 .retrieve()
@@ -171,7 +171,7 @@ public class PartnerService {
                     List<Mono<List<RawSolution>>> batchMonos = new ArrayList<>();
                     for (int start = 0; start < total; start += BATCH_SIZE) {
                         String url = String.format(SOLUTIONS_URL_TEMPLATE, start, BATCH_SIZE);
-                        log.info("Solution: Fetch data start: {} and the url: {}", start, url);
+//                        log.info("Solution: Fetch data start: {} and the url: {}", start, url);
                         Mono<List<RawSolution>> batchMono = webClient.get()
                                 .uri(url)
                                 .retrieve()

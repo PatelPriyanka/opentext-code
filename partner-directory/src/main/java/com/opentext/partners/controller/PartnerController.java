@@ -56,4 +56,10 @@ public class PartnerController {
         List<PartnerSolution> joinedData = partnerService.getJoinedPartners();
         return ResponseEntity.ok(joinedData);
     }
+
+    @GetMapping("/refresh")
+    public String forceRefresh() {
+        partnerService.loadAndJoinData();
+        return "Refresh triggered";
+    }
 }

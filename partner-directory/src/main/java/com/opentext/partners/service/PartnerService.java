@@ -7,259 +7,236 @@ import com.opentext.partners.model.PartnerModels.RawPartner;
 import com.opentext.partners.model.SolutionModels.RawSolution;
 import com.opentext.partners.model.SolutionModels.SolutionCatalogRoot;
 import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-// Removed unused @Cacheable import
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import lombok.extern.slf4j.Slf4j;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.stream.Collectors;
+import java.time.Duration;
 
-import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.web.reactive.function.client.ExchangeStrategies;
-import reactor.netty.http.client.HttpClient;
-
+@Slf4j
 @Service
 public class PartnerService {
 
-    private static final Logger log = LoggerFactory.getLogger(PartnerService.class);
-
-    // --- UPDATED: URLs are now templates with a %d placeholder ---
+    /**
+     * Partner and Solution data source URLs.
+     * Support pagination via the 'max' parameter.
+     */
     private static final String PARTNERS_URL_TEMPLATE =
-            "https://www.opentext.com/en/partners/partners-directory-overview/1716790338234.ajax?q=&start=0&max=%d&sorter=Default_Sort";
+            "https://www.opentext.com/en/partners/partners-directory-overview/1716790338234.ajax?q=&start=%d&max=%d&sorter=Default_Sort";
     private static final String SOLUTIONS_URL_TEMPLATE =
-            "https://www.opentext.com/en/partners/ApplicationMarketplace/1754971906819.ajax?q=&start=0&max=%d&sorter=Name";
+            "https://www.opentext.com/en/partners/ApplicationMarketplace/1754971906819.ajax?q=&start=%d&max=%d&sorter=Name";
+
+    private static final int BATCH_SIZE = 200; // Fetch in manageable batches
+
+    private static final Duration API_TIMEOUT = Duration.ofSeconds(50);
 
     private final WebClient webClient;
 
-    // Using volatile for thread-safe writes to the cache after initialization
+    /**
+     * Cached in-memory Data: joined partner-solution data. Ensures thread-safe.
+     * volatile ensures that changes made by one thread (the refresh thread) are immediately visible to others
+     * */
     private volatile List<PartnerSolution> joinedPartnersCache = Collections.emptyList();
 
-    /**
-     * --- NEW / FIXED CONSTRUCTOR ---
-     * This injects the WebClient.Builder and initializes the webClient field.
-     */
-//    public PartnerService(WebClient.Builder webClientBuilder) {
-//        this.webClient = webClientBuilder.build();
-//    }
-
     public PartnerService(WebClient.Builder webClientBuilder) {
-        // increase buffer size (default: 256KB → set to 10MB)
-        ExchangeStrategies strategies = ExchangeStrategies.builder()
-                .codecs(configurer -> configurer
-                        .defaultCodecs()
-                        .maxInMemorySize(10 * 1024 * 1024)) // 10 MB
-                .build();
-
-        this.webClient = webClientBuilder
-                .clientConnector(new ReactorClientHttpConnector(HttpClient.create()))
-                .exchangeStrategies(strategies)
-                .build();
+        this.webClient = webClientBuilder.build();
     }
 
-    /**
-     * --- UPDATED ---
-     * This method runs on application startup.
-     */
+    /** Runs once after startup to initialize cache */
     @PostConstruct
     public void loadAndJoinData() {
-        log.info("Starting dynamic data load and join...");
+        refreshPartnerSolutionData();
+    }
 
-        // 1. Call the new dynamic fetch methods
+    /** Scheduled refresh : The task will run every 3rd minute*/
+    @Scheduled(cron = "0 */3 * * * *")
+    public void scheduledDataRefresh() {
+        log.info("Scheduled partner-solution data refresh triggered...");
+        refreshPartnerSolutionData();
+    }
+
+    /** Refreshes the partner-solution cache */
+    private void refreshPartnerSolutionData() {
+        log.info("Starting data load & join process...");
+
         Mono<List<RawPartner>> partnersMono = fetchAllPartners();
         Mono<List<RawSolution>> solutionsMono = fetchAllSolutions();
 
-        // 2. Zip results and perform the join (your original logic)
         Mono.zip(partnersMono, solutionsMono)
-                .map(tuple -> {
-                    List<RawPartner> partners = tuple.getT1();
-                    List<RawSolution> solutions = tuple.getT2();
-
-                    log.info("Successfully fetched {} partners and {} solutions.", partners.size(), solutions.size());
-                    log.info("--- JOIN ASSUMPTIONS (for Q-2) ---");
-                    log.info("1. Joining on Partner Name: 'Partner.Name' and 'Solution.solutionpartnername'.");
-                    log.info("2. Case-Sensitivity: The join is case-sensitive.");
-                    log.info("3. Cardinality: A partner can have zero, one, or many solutions.");
-                    log.info("--- END ASSUMPTIONS ---");
-
-                    Map<String, List<RawSolution>> solutionsByPartner = solutions.stream()
-                            .filter(s -> s.partnerName() != null && !s.partnerName().isBlank())
-                            .collect(Collectors.groupingBy(RawSolution::partnerName));
-
-                    return partners.stream()
-                            .map(partner -> {
-                                List<Solution> partnerSolutions = solutionsByPartner
-                                        .getOrDefault(partner.name(), Collections.emptyList())
-                                        .stream()
-                                        .map(raw -> new Solution(raw.displayName(), raw.shortDescription()))
-                                        .toList();
-
-                                // Using your JoinedPartnerDto structure
-                                return new PartnerSolution(
-                                        partner.name(),
-                                        partner.id(),
-                                        partner.partnerLevel(),
-                                        partner.partnerType(),
-                                        partner.shortDescription(),
-                                        partner.companyOverview(),
-                                        partnerSolutions
-                                );
-                            })
-                            .toList();
-                })
+                .map(tuple -> joinPartnerAndSolution(tuple.getT1(), tuple.getT2()))
                 .subscribe(
                         joinedList -> {
-                            this.joinedPartnersCache = joinedList; // Populate the cache
-                            log.info("Successfully cached {} joined partners.", this.joinedPartnersCache.size());
+                            this.joinedPartnersCache = joinedList;
+                            log.info("Cached {} joined partners successfully.", joinedList.size());
                         },
-                        error -> {
-                            log.error("Failed to load or join partner data on startup!", error);
-                        }
+                        error -> log.error("Failed to refresh partner/solution data!", error)
                 );
     }
 
+    /** Joins partners with solutions (case-insensitive) */
+    private List<PartnerSolution> joinPartnerAndSolution(List<RawPartner> partners, List<RawSolution> solutions) {
+        log.info("Joining {} partners with {} solutions...", partners.size(), solutions.size());
+
+        // --- ASSUMPTIONS ---
+        log.info("JOIN ASSUMPTIONS:");
+        log.info("1. Join key: Partner.name ↔ Solution.partnerName (case-insensitive).");
+        log.info("2. A partner can have zero, one, or multiple solutions.");
+        log.info("3. Null or blank names are ignored in joining.");
+        log.info("4. Solutions without valid partnerName remain unlinked.");
+        log.info("5. The joined data is cached in-memory for API pagination.");
+
+        Map<String, List<RawSolution>> solutionsByPartner = solutions.stream()
+                .filter(s -> s.partnerName() != null && !s.partnerName().isBlank())
+                .collect(Collectors.groupingBy(s -> s.partnerName().toLowerCase(Locale.ROOT)));
+
+        return partners.stream()
+                .map(partner -> {
+                    String partnerKey = partner.name() != null ? partner.name().toLowerCase(Locale.ROOT) : "";
+                    List<Solution> partnerSolutions = solutionsByPartner
+                            .getOrDefault(partnerKey, Collections.emptyList())
+                            .stream()
+                            .map(raw -> new Solution(raw.displayName(), raw.shortDescription()))
+                            .toList();
+
+                    return new PartnerSolution(
+                            partner.name(),
+                            partner.id(),
+                            partner.partnerLevel(),
+                            partner.partnerType(),
+                            partner.shortDescription(),
+                            partner.companyOverview(),
+                            partnerSolutions
+                    );
+                })
+                .toList();
+    }
+
+    /** Fetches all partners with batched pagination
+     * Mono: represents a single asynchronous result (list of partners/solutions).
+     * Flux: represents multiple asynchronous streams (used to combine batches).
+     * */
+    private Mono<List<RawPartner>> fetchAllPartners() {
+        String initialUrl = String.format(PARTNERS_URL_TEMPLATE, 0, 1);
+        return webClient.get().uri(initialUrl)
+                .retrieve()
+                .bodyToMono(PartnerDirectoryRoot.class).timeout(API_TIMEOUT)
+                .flatMap(initial -> {
+                    int total = safeParseInt(initial.total());
+                    if (total == 0) return Mono.just(Collections.<RawPartner>emptyList());
+
+                    List<Mono<List<RawPartner>>> batchMonos = new ArrayList<>();
+                    for (int start = 0; start < total; start += BATCH_SIZE) {
+                        String url = String.format(PARTNERS_URL_TEMPLATE, start, BATCH_SIZE);
+                        log.info("Partner: Fetch data start: {} and the url: {}", start, url);
+                        Mono<List<RawPartner>> batchMono = webClient.get()
+                                .uri(url)
+                                .retrieve()
+                                .bodyToMono(PartnerDirectoryRoot.class)
+                                .map(PartnerDirectoryRoot::getAllPartners)
+                                .onErrorReturn(Collections.<RawPartner>emptyList());
+                        batchMonos.add(batchMono);
+                    }
+
+                    // Merge batches type-safely
+                    return Flux.fromIterable(batchMonos)
+                            .flatMap(batch -> batch.flatMapMany(Flux::fromIterable))
+                            .collectList();
+                })
+                .onErrorReturn(Collections.<RawPartner>emptyList());
+    }
+
+    /** Fetches all solutions with batched pagination
+     * Mono: represents a single asynchronous result (list of partners/solutions).
+     * Flux: represents multiple asynchronous streams (used to combine batches).
+     * */
+    private Mono<List<RawSolution>> fetchAllSolutions() {
+        String initialUrl = String.format(SOLUTIONS_URL_TEMPLATE, 0, 1);
+        return webClient.get().uri(initialUrl)
+                .retrieve()
+                .bodyToMono(SolutionCatalogRoot.class).timeout(API_TIMEOUT)
+                .flatMap(initial -> {
+                    int total = safeParseInt(initial.total());
+                    if (total == 0) return Mono.just(Collections.<RawSolution>emptyList());
+
+                    List<Mono<List<RawSolution>>> batchMonos = new ArrayList<>();
+                    for (int start = 0; start < total; start += BATCH_SIZE) {
+                        String url = String.format(SOLUTIONS_URL_TEMPLATE, start, BATCH_SIZE);
+                        log.info("Solution: Fetch data start: {} and the url: {}", start, url);
+                        Mono<List<RawSolution>> batchMono = webClient.get()
+                                .uri(url)
+                                .retrieve()
+                                .bodyToMono(SolutionCatalogRoot.class)
+                                .map(SolutionCatalogRoot::getAllSolutions)
+                                .onErrorReturn(Collections.<RawSolution>emptyList());
+                        batchMonos.add(batchMono);
+                    }
+
+                    return Flux.fromIterable(batchMonos)
+                            .flatMap(batch -> batch.flatMapMany(Flux::fromIterable))
+                            .collectList();
+                })
+                .onErrorReturn(Collections.<RawSolution>emptyList());
+    }
+
+    /** Safe parsing of integer 'total' fields */
+    private int safeParseInt(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (Exception e) {
+            log.warn("Invalid total value '{}', defaulting to 0", value);
+            return 0;
+        }
+    }
+
     /**
-     * --- NEW METHOD ---
-     * Exposes the full list of joined partners from the cache for the /partners/joined-json endpoint (Q-2).
+     * Example: Redis Caching (Commented out)
+     * Redis is useful for fast, distributed, in-memory caching to reduce API/db load
+     * and provide low-latency access to frequently used data.
      *
-     * @return An immutable copy of the full list of joined PartnerSolution objects.
+     * If we wanted to cache the joined partners in Redis:
+     *
+     * @Cacheable(value = "joinedPartners")
+     * public List<PartnerSolution> getJoinedPartners() {
+     *     return List.copyOf(this.joinedPartnersCache);
+     * }
+     *
+     * To refresh the cache whenever data updates (every 3 minutes in our scheduler):
+     *
+     * @CachePut(value = "joinedPartners", unless = "#result == null")
+     * private List<PartnerSolution> refreshCache(List<PartnerSolution> updatedList) {
+     *     return updatedList;
+     * }
+     *
+     * Note: We are not using Redis now, as our in-memory volatile list is sufficient for this use case.
      */
+
+    /** Returns cached joined partners */
     public List<PartnerSolution> getJoinedPartners() {
         return List.copyOf(this.joinedPartnersCache);
     }
 
-    /**
-     * --- NEW METHOD with GENERIC FIX ---
-     * Dynamically fetches ALL partners from the API.
-     * 1. Fetches 1 record to get the 'total' count.
-     * 2. Uses the 'total' to fetch all records.
-     */
-    private Mono<List<RawPartner>> fetchAllPartners() {
-        String initialUrl = String.format(PARTNERS_URL_TEMPLATE, 1);
-        log.info("Fetching total partner count from: {}", initialUrl);
-
-        return this.webClient.get().uri(initialUrl)
-                .retrieve()
-                .bodyToMono(PartnerDirectoryRoot.class) // Gets the DTO with the 'total' field
-                .flatMap(initialResponse -> {
-                    // Parse total. Use a default just in case.
-                    int total = 0;
-                    try {
-                        total = Integer.parseInt(initialResponse.total());
-                    } catch (NumberFormatException e) {
-                        log.error("Could not parse partner total: {}", initialResponse.total(), e);
-                        // FIX: Specify generic type for an empty list
-                        return Mono.just(Collections.<RawPartner>emptyList());
-                    }
-
-                    log.info("Discovered total of {} partners.", total);
-                    if (total == 0) {
-                        // FIX: Specify generic type for an empty list
-                        return Mono.just(Collections.<RawPartner>emptyList());
-                    }
-
-                    // Step 2: Make the real call to get all partners
-                    String fullUrl = String.format(PARTNERS_URL_TEMPLATE, total);
-                    log.info("Fetching all partners from: {}", fullUrl);
-                    return this.webClient.get().uri(fullUrl)
-                            .retrieve()
-                            .bodyToMono(PartnerDirectoryRoot.class)
-                            .map(PartnerDirectoryRoot::getAllPartners); // Use the new helper
-                })
-                .doOnError(e -> log.error("Failed to fetch partners", e))
-                // FIX: Specify generic type for the empty list on error
-                .onErrorReturn(Collections.emptyList());
-    }
-
-    /**
-     * --- NEW METHOD with GENERIC FIX ---
-     * Dynamically fetches ALL solutions from the API.
-     * 1. Fetches 1 record to get the 'total' count.
-     * 2. Uses the 'total' to fetch all records.
-     */
-    private Mono<List<RawSolution>> fetchAllSolutions() {
-        String initialUrl = String.format(SOLUTIONS_URL_TEMPLATE, 1);
-        log.info("Fetching total solution count from: {}", initialUrl);
-
-        return this.webClient.get().uri(initialUrl)
-                .retrieve()
-                .bodyToMono(SolutionCatalogRoot.class)
-                .flatMap(initialResponse -> {
-                    // Parse total. Use a default just in case.
-                    int total = 0;
-                    try {
-                        total = Integer.parseInt(initialResponse.total());
-                    } catch (NumberFormatException e) {
-                        log.error("Could not parse solution total: {}", initialResponse.total(), e);
-                        // FIX: Specify generic type for an empty list
-                        return Mono.just(Collections.<RawSolution>emptyList());
-                    }
-
-                    log.info("Discovered total of {} solutions.", total);
-                    if (total == 0) {
-                        // FIX: Specify generic type for an empty list
-                        return Mono.just(Collections.<RawSolution>emptyList());
-                    }
-
-                    // Step 2: Make the real call to get all solutions
-                    String fullUrl = String.format(SOLUTIONS_URL_TEMPLATE, total);
-                    log.info("Fetching all solutions from: {}", fullUrl);
-                    return this.webClient.get().uri(fullUrl)
-                            .retrieve()
-                            .bodyToMono(SolutionCatalogRoot.class)
-                            .map(SolutionCatalogRoot::getAllSolutions); // Use the new helper
-                })
-                .doOnError(e -> log.error("Failed to fetch solutions", e))
-                // FIX: Specify generic type for the empty list on error
-                .onErrorReturn(Collections.emptyList());
-    }
-
-    /**
-     * --- Mandatory pagination (for Q-3).
-     * Uses the pre-fetched list, ensuring fast response times after init.
-     *
-     * @param pageable The pagination information (page number, size, sort).
-     * @param hasSolutions (Bonus) If true, filters for partners with 1 or more solutions.
-     * @return A Page object containing the PartnerSolution DTOs.
-     */
+    /** Returns paginated partners with optional filtering for those with solutions */
     public Page<PartnerSolution> getPartners(Pageable pageable, boolean hasSolutions) {
+        List<PartnerSolution> filtered = joinedPartnersCache.stream()
+                .filter(p -> !hasSolutions || (p.solutions() != null && !p.solutions().isEmpty()))
+                .toList();
 
-        // 1. Filter the entire cached list based on the 'hasSolutions' flag
-        List<PartnerSolution> filteredList;
-        if (hasSolutions) {
-            filteredList = this.joinedPartnersCache.stream()
-                    .filter(partner -> partner.solutions() != null && !partner.solutions().isEmpty())
-                    .toList();
-        } else {
-            // Use an immutable copy for thread safety
-            filteredList = List.copyOf(this.joinedPartnersCache);
-        }
-
-        // 2. Determine pagination boundaries
-        int totalSize = filteredList.size();
+        int total = filtered.size();
         int start = (int) pageable.getOffset();
+        int end = Math.min(start + pageable.getPageSize(), total);
 
-        // Handle edge case where requested page is beyond the data
-        if (start >= totalSize) {
-            return Page.empty(pageable);
-        }
+        if (start >= total) return Page.empty(pageable);
 
-        int end = Math.min(start + pageable.getPageSize(), totalSize);
-
-        // 3. Extract the sublist for the current page
-        List<PartnerSolution> pageContent = filteredList.subList(start, end);
-
-        // 4. Return the result wrapped in a Page object
-        return new PageImpl<>(pageContent, pageable, totalSize);
+        return new PageImpl<>(filtered.subList(start, end), pageable, total);
     }
-
-
 }

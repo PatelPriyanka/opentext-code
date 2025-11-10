@@ -59,7 +59,7 @@ Backend REST API is served at: http://localhost:8080
 ```
 cd frontend/
 npm install      # run once
-npm run dev
+npm run start
 ```
 Frontend runs at: http://localhost:3000
 
